@@ -1,3 +1,9 @@
+import spaces
+
+@spaces.GPU
+def _warmup():
+    return "ok"
+
 # 將 dataclass 和 Tool Calling 結合，讓 AI 可以根據新舊客戶動態調整語氣與策略
 
 import os
