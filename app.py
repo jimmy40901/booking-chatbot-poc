@@ -1,16 +1,16 @@
+import gradio as gr
 import spaces
 
 @spaces.GPU
 def _warmup():
     return "ok"
 
-# 將 dataclass 和 Tool Calling 結合，讓 AI 可以根據新舊客戶動態調整語氣與策略
-
 import os
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from dataclasses import dataclass
+import numpy as np
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
@@ -25,7 +25,7 @@ class Customer:
     visit_count: int = 0
     is_birthday_month: bool = False
 
-# ---------- 真實工具函式 ----------
+# ---------- 真實工具函式(結構化資料查詢) ----------
 
 def check_opening_hours(day: str) -> str:
     """查詢指定星期幾的營業時間"""
@@ -50,7 +50,57 @@ def check_service_price(service: str) -> str:
     }
     return prices.get(service, "查無此服務項目")
 
-# ---------- 工具說明書(給 Gemini 看) ----------
+# ---------- RAG：FAQ 資料與向量化 ----------
+
+faq_list = [
+    "我們的剪髮服務包含洗髮、剪髮、吹整，約需 1 小時",
+    "染髮後建議 48 小時內避免洗頭，讓染劑完全附著",
+    "燙髮後一週內請勿使用電棒夾，以免影響捲度",
+    "初次來店建議先預約，假日現場候位時間較長",
+    "我們使用的染劑為日系進口品牌，低敏配方，但仍建議事先告知過敏史",
+]
+
+faq_vectors = []
+for faq in faq_list:
+    result = client.models.embed_content(
+        model="gemini-embedding-001",
+        contents=faq
+    )
+    faq_vectors.append(result.embeddings[0].values)
+
+def cosine_similarity(a, b):
+    a = np.array(a)
+    b = np.array(b)
+    dot_product = np.dot(a, b)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    return dot_product / (norm_a * norm_b)
+
+def retrieve(question: str, faq_list: list[str], faq_vectors: list) -> str:
+    question_result = client.models.embed_content(
+        model="gemini-embedding-001",
+        contents=question
+    )
+    question_vector = question_result.embeddings[0].values
+
+    best_score = -1
+    best_faq = ""
+
+    for i in range(len(faq_list)):
+        score = cosine_similarity(question_vector, faq_vectors[i])
+        if score > best_score:
+            best_score = score
+            best_faq = faq_list[i]
+
+    return best_faq
+
+# ---------- 把 RAG 包裝成工具，供 Tool Calling 使用 ----------
+
+def search_faq(question: str) -> str:
+    """當客人詢問染髮後注意事項、燙髮保養、預約規則、染劑成分等非制式問題時，搜尋相關的服務說明文件"""
+    return retrieve(question, faq_list, faq_vectors)
+
+# ---------- 工具說明書(給 Gemini 看，三個工具) ----------
 
 tools = types.Tool(function_declarations=[
     {
@@ -74,6 +124,17 @@ tools = types.Tool(function_declarations=[
             },
             "required": ["service"]
         }
+    },
+    {
+        "name": "search_faq",
+        "description": "當客人詢問染髮後注意事項、燙髮保養、預約規則、染劑成分等非制式問題時，搜尋相關的服務說明文件",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "客人詢問的問題原文"}
+            },
+            "required": ["question"]
+        }
     }
 ])
 
@@ -91,7 +152,7 @@ def build_system_prompt(customer: Customer) -> str:
 
     return base + extra
 
-# ---------- 把整套流程包成可重複呼叫的函式 ----------
+# ---------- 把整套流程包成可重複呼叫的函式(三個工具都能用) ----------
 
 def ask(question: str, customer: Customer) -> str:
     system_prompt = build_system_prompt(customer)
@@ -114,6 +175,8 @@ def ask(question: str, customer: Customer) -> str:
         tool_result = check_opening_hours(**function_call.args)
     elif function_call.name == "check_service_price":
         tool_result = check_service_price(**function_call.args)
+    elif function_call.name == "search_faq":
+        tool_result = search_faq(**function_call.args)
 
     final_response = client.models.generate_content(
         model="gemini-3.5-flash-lite",
@@ -135,7 +198,7 @@ def ask(question: str, customer: Customer) -> str:
     )
     return final_response.text
 
-# ---------- 建立 Chatbot 介面 ----------
+# ---------- Gradio 介面 ----------
 
 def chatbot_interface(question: str, customer_type: str, visit_count: int) -> str:
     if customer_type == "新客":
@@ -144,8 +207,6 @@ def chatbot_interface(question: str, customer_type: str, visit_count: int) -> st
         customer = Customer(name="訪客", is_new=False, visit_count=visit_count)
 
     return ask(question, customer)
-
-import gradio as gr
 
 demo = gr.Interface(
     fn=chatbot_interface,
@@ -156,7 +217,7 @@ demo = gr.Interface(
     ],
     outputs=gr.Textbox(label="客服回覆"),
     title="髮廊客服 Chatbot POC",
-    description="輸入問題，選擇客戶身分，體驗 AI 根據身分動態調整回應策略"
+    description="輸入問題，選擇客戶身分，體驗 AI 根據身分動態調整回應策略，並能查詢結構化資料(營業時間/價格)或搜尋服務說明文件(RAG)"
 )
 
 demo.launch()
