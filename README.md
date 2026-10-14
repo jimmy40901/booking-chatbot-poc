@@ -79,15 +79,17 @@ Tool Calling 僅適用於結構化、可明確定義參數的查詢（如查詢�
 - 向量運算：NumPy（自行實作餘弦相似度，尚未使用向量資料庫）
 - 介面與部署：Gradio、Hugging Face Spaces
 - 規劃以 Claude API 做對照比較
+- 向量索引：FAQ 向量預先計算後存成 `.npy` 檔（`build_index.py`），啟動時直接載入，不需每次呼叫 Embedding API
 
 ## 目前限制與下一步
 
 ### 目前限制
 
-- 營業時間、價格、FAQ（5 筆）與空位判斷皆為模擬資料，尚未連接資料庫
+- 營業時間、價格與空位判斷為模擬資料，FAQ（50 筆）為自行撰寫的模擬資料，尚未連接資料庫
 - 預約日期固定為禮拜二，尚未讓使用者指定
 - 客戶身分機制已實作於 `ask()`，但多 Agent 版本的介面使用固定身分（一般舊客），尚未開放選擇
 - 每次提問獨立處理，沒有跨輪對話記憶；意圖不明確時僅提示重新輸入，尚未形成多輪追問
+- RAG 檢索到正確的 FAQ 後，LLM 生成回答時仍可能補充 FAQ 沒有的內容（例如自行加上未經確認的建議），目前以 System Prompt 約束，尚未系統性評估
 
 ### 下一步規劃
 
@@ -116,3 +118,5 @@ python app.py
 ```
 
 部署到 Hugging Face Spaces 時，請在 Space 的 Settings 中新增名為 `GEMINI_API_KEY` 的 Secret，不需要上傳 `.env`。
+
+修改 `data/faq.csv` 後，需先刪除 `data/faq_vectors_q.npy`，再執行 `python build_index.py` 重新建立索引，否則向量會與 FAQ 內容對不上。
