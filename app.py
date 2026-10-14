@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
 import numpy as np
+import pandas as pd
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
@@ -50,39 +51,37 @@ def check_service_price(service: str) -> str:
     prices = {"剪髮": "500元", "洗髮": "300元", "染髮": "1500元", "燙髮": "2000元"}
     return prices.get(service, "查無此服務項目")
 
-faq_list = [
-    "我們的剪髮服務包含洗髮、剪髮、吹整，約需 1 小時",
-    "染髮後建議 48 小時內避免洗頭，讓染劑完全附著",
-    "燙髮後一週內請勿使用電棒夾，以免影響捲度",
-    "初次來店建議先預約，假日現場候位時間較長",
-    "我們使用的染劑為日系進口品牌，低敏配方，但仍建議事先告知過敏史",
-]
+# ---------- FAQ 資料：讀取 CSV 與預先建好的向量(由 build_index.py 產生) ----------
+# 用「這個檔案所在的資料夾」當基準，不管從哪裡執行都找得到 data 資料夾
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-faq_vectors = []
-for faq in faq_list:
-    result = client.models.embed_content(model="gemini-embedding-001", contents=faq)
-    faq_vectors.append(result.embeddings[0].values)
+faq_df = pd.read_csv(os.path.join(BASE_DIR, "data", "faq.csv"), encoding="utf-8-sig")
+faq_vectors = np.load(os.path.join(BASE_DIR, "data", "faq_vectors_q.npy"))  # 第 i 列對應 faq_df 的第 i 筆
 
 def cosine_similarity(a, b):
     a = np.array(a)
     b = np.array(b)
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-def retrieve(question: str, faq_list: list[str], faq_vectors: list) -> str:
+def retrieve(question: str) -> str:
     question_result = client.models.embed_content(model="gemini-embedding-001", contents=question)
     question_vector = question_result.embeddings[0].values
+
     best_score = -1
-    best_faq = ""
-    for i in range(len(faq_list)):
+    best_index = 0
+    for i in range(len(faq_vectors)):
         score = cosine_similarity(question_vector, faq_vectors[i])
         if score > best_score:
             best_score = score
-            best_faq = faq_list[i]
-    return best_faq
+            best_index = i
+
+    # 用向量找出「第幾筆」，但交給 Gemini 的是那一筆完整的問題與回答
+    row = faq_df.iloc[best_index]
+    return f"問題：{row['question']}\n回答：{row['answer']}"
 
 def search_faq(question: str) -> str:
     """當客人詢問染髮後注意事項、燙髮保養、預約規則、染劑成分等非制式問題時，搜尋相關的服務說明文件"""
-    return retrieve(question, faq_list, faq_vectors)
+    return retrieve(question)
 
 tools = types.Tool(function_declarations=[
     {
@@ -109,7 +108,7 @@ tools = types.Tool(function_declarations=[
 ])
 
 def build_system_prompt(customer: Customer) -> str:
-    base = "你是一間髮廊的客服人員，語氣親切，只回答跟營業時間、服務價格有關的問題。"
+    base = "你是一間髮廊的客服人員，語氣親切。請回答營業時間、服務價格、服務內容、預約規則與髮質保養相關的問題。若查詢不到相關資訊，請誠實告知無法確定，不要編造答案。"
     if customer.is_new:
         extra = "這位是新客，請特別介紹一下我們的服務，並歡迎他第一次光臨。"
     elif customer.visit_count >= 5:
