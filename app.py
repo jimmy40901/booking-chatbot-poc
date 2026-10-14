@@ -108,8 +108,9 @@ tools = types.Tool(function_declarations=[
 ])
 
 def build_system_prompt(customer: Customer) -> str:
-    base = "你是一間髮廊的客服人員，語氣親切。請回答營業時間、服務價格、服務內容、預約規則與髮質保養相關的問題。若查詢不到相關資訊，請誠實告知無法確定，不要編造答案。"
-    if customer.is_new:
+    base = "你是一間髮廊的客服人員，語氣親切。請回答營業時間、服務價格、服務內容、預約規則與髮質保養相關的問題。若查詢不到相關資訊，請誠實告知無法確定，不要編造答案。回答時只根據查詢到的內容，不要自行補充查詢結果沒有提到的建議或規定。"
+        
+    if customer.is_new:    
         extra = "這位是新客，請特別介紹一下我們的服務，並歡迎他第一次光臨。"
     elif customer.visit_count >= 5:
         extra = f"這位是熟客（已經來訪 {customer.visit_count} 次），可以用更輕鬆熟悉的語氣對話，並主動提及老客戶有 9 折優惠。"
