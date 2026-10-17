@@ -36,6 +36,7 @@ class Customer:
     is_new: bool
     visit_count: int = 0
     is_birthday_month: bool = False
+    id: int | None = None  # 資料庫裡的編號；尚未存進資料庫的客人是 None
 
 # ====================================================
 # 區塊 2：FAQ Agent 所需的一切(Phase 1-2：Tool Calling + RAG)
@@ -62,6 +63,90 @@ def check_service_price(service: str) -> str:
     """查詢指定服務項目的價格"""
     row = query_one("SELECT price FROM services WHERE name = ?", (service,))
     return f"{row[0]}元" if row else "查無此服務項目"
+
+# ---------- 辨識客人：用姓名到資料庫查詢(之後接 LINE 時，改成用 LINE 的使用者 ID 查) ----------
+
+def find_customer(name: str):
+    row = query_one("SELECT id, name, visit_count FROM customers WHERE name = ?", (name,))
+    if row is None:
+        return None
+    customer_id, customer_name, visit_count = row
+    return Customer(name=customer_name, is_new=(visit_count == 0), visit_count=visit_count, id=customer_id)
+
+def identify_customer(name: str) -> Customer:
+    name = (name or "").strip()
+    if not name:
+        return Customer(name="訪客", is_new=False, visit_count=0)  # 沒提供姓名：一般客人
+    found = find_customer(name)
+    if found:
+        return found
+    return Customer(name=name, is_new=True, visit_count=0)  # 資料庫查無此人：當作新客(尚未寫入資料庫)
+
+MAX_PER_DAY = 5  # 每天最多接幾位客人(同一位客人同一天預約多項服務，視為同一次到店，只佔一個名額)
+
+def query_all(sql: str, params: tuple = ()):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        return conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+def count_visits(date_str: str) -> int:
+    """這一天有幾位客人預約(同一位客人預約多項服務，只算一位)"""
+    row = query_one(
+        "SELECT COUNT(DISTINCT customer_id) FROM appointments WHERE date = ? AND status = 'confirmed'",
+        (date_str,)
+    )
+    return row[0]
+
+def booked_services(customer_name: str, date_str: str) -> list:
+    """這位客人這一天已經預約了哪些服務，回傳 [(預約編號, 服務), ...]"""
+    name = (customer_name or "").strip()[:30]
+    if not name:
+        return []
+    return query_all(
+        """SELECT a.id, a.service FROM appointments a JOIN customers c ON c.id = a.customer_id
+           WHERE c.name = ? AND a.date = ? AND a.status = 'confirmed' ORDER BY a.id""",
+        (name, date_str)
+    )
+
+def create_appointment(customer_name: str, service: str, date_str: str) -> int:
+    """寫入一筆預約，回傳預約編號；不能寫入(額滿，或同一天同一項服務已預約過)時回傳 0。
+    客人不在資料庫時，先建立客人(新客，來訪 0 次)。"""
+    name = customer_name.strip()[:30]
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute("SELECT id FROM customers WHERE name = ?", (name,)).fetchone()
+        if row is None:
+            cur = conn.execute("INSERT INTO customers (name, visit_count) VALUES (?, 0)", (name,))
+            customer_id = cur.lastrowid
+        else:
+            customer_id = row[0]
+
+        # 「檢查」和「寫入」放在同一個 SQL 動作裡，就算兩個請求幾乎同時進來也不會出錯：
+        #  (1) 同一位客人、同一天、同一項服務還沒預約過
+        #  (2) 這位客人這天已經有預約(加一項服務算同一次到店)，或是當天客人數還沒滿
+        cur = conn.execute(
+            """INSERT INTO appointments (customer_id, service, date)
+               SELECT ?, ?, ?
+               WHERE NOT EXISTS (SELECT 1 FROM appointments
+                                 WHERE customer_id = ? AND date = ? AND service = ? AND status = 'confirmed')
+                 AND (EXISTS (SELECT 1 FROM appointments
+                              WHERE customer_id = ? AND date = ? AND status = 'confirmed')
+                      OR (SELECT COUNT(DISTINCT customer_id) FROM appointments
+                          WHERE date = ? AND status = 'confirmed') < ?)""",
+            (customer_id, service, date_str,
+             customer_id, date_str, service,
+             customer_id, date_str,
+             date_str, MAX_PER_DAY)
+        )
+        if cur.rowcount == 0:
+            conn.rollback()  # 沒寫入：連剛剛新建的客人一起復原
+            return 0
+        conn.commit()  # 要 commit，寫入才會真的存進檔案
+        return cur.lastrowid
+    finally:
+        conn.close()
 
 # ---------- FAQ 資料：讀取 CSV 與預先建好的向量(由 build_index.py 產生) ----------
 # 用「這個檔案所在的資料夾」當基準，不管從哪裡執行都找得到 data 資料夾
@@ -127,6 +212,8 @@ def build_system_prompt(customer: Customer) -> str:
         extra = f"這位是熟客（已經來訪 {customer.visit_count} 次），可以用更輕鬆熟悉的語氣對話，並主動提及老客戶有 9 折優惠。"
     else:
         extra = "這位是一般舊客，正常親切應對即可。"
+    if customer.name != "訪客":
+        extra += f"客人的名字是{customer.name}，可以適度稱呼對方。"
     return base + extra
 
 def ask(question: str, customer: Customer) -> str:
@@ -167,28 +254,62 @@ def ask(question: str, customer: Customer) -> str:
 # ====================================================
 
 WEEKDAYS = ["禮拜一", "禮拜二", "禮拜三", "禮拜四", "禮拜五", "禮拜六", "禮拜天"]
-TAIPEI = timezone(timedelta(hours=8))  # 台灣時區(UTC+8)，避免伺服器在 UTC 時算錯星期
+TAIPEI = timezone(timedelta(hours=8))  # 台灣時區(UTC+8)，避免伺服器在 UTC 時算錯日期
+VALID_DAYS = ["今天", "明天", "後天"] + WEEKDAYS
+VALID_SERVICES = ["剪髮", "洗髮", "染髮", "燙髮"]
 
-def today_info() -> dict:
-    now = datetime.now(TAIPEI)
-    wd = now.weekday()  # 星期一是 0，星期天是 6
-    return {
-        "date": now.strftime("%Y-%m-%d"),
-        "today": WEEKDAYS[wd],
-        "tomorrow": WEEKDAYS[(wd + 1) % 7],
-        "day_after": WEEKDAYS[(wd + 2) % 7],
-    }
+def resolve_date(day_phrase: str, today=None) -> str:
+    """把客人說的日期說法換算成真實日期(YYYY-MM-DD)；無法判斷時回傳空字串。
+    規則：「今天、明天、後天」照字面；「禮拜X」是從明天起算最近的那一天
+    (客人說的星期剛好是今天的星期時，視為下週；要指今天，客人會說「今天」)。"""
+    if today is None:
+        today = datetime.now(TAIPEI).date()
+    if day_phrase == "今天":
+        target = today
+    elif day_phrase == "明天":
+        target = today + timedelta(days=1)
+    elif day_phrase == "後天":
+        target = today + timedelta(days=2)
+    elif day_phrase in WEEKDAYS:
+        delta = (WEEKDAYS.index(day_phrase) - today.weekday()) % 7  # 星期一是 0，星期天是 6
+        if delta == 0:
+            delta = 7
+        target = today + timedelta(days=delta)
+    else:
+        return ""
+    return target.isoformat()
+
+def weekday_label(date_str: str) -> str:
+    return WEEKDAYS[datetime.strptime(date_str, "%Y-%m-%d").weekday()]
+
+def fmt_date(date_str: str) -> str:
+    return f"{date_str}（{weekday_label(date_str)}）"
+
+def find_open_dates(start_date_str: str, days: int = 14, limit: int = 3) -> list:
+    """從指定日期的隔天起算，往後 days 天內，找出「有營業、而且還沒額滿」的日子"""
+    start = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+    found = []
+    for i in range(1, days + 1):
+        d = start + timedelta(days=i)
+        d_str = d.isoformat()
+        hours = check_opening_hours(WEEKDAYS[d.weekday()])
+        if hours in ("公休", "查無此資料"):
+            continue
+        if count_visits(d_str) >= MAX_PER_DAY:
+            continue
+        found.append(d_str)
+        if len(found) == limit:
+            break
+    return found
 
 def extract_booking_info(user_message: str) -> dict:
-    t = today_info()
+    """請 LLM 只負責「聽懂客人的說法」；換算成真實日期交給 Python(resolve_date)。"""
     prompt = f"""從客人的話中提取預約資訊，以 JSON 回覆，格式如下：
 {{"service": "...", "day": "..."}}
 
-今天是 {t['today']}（{t['date']}），明天是 {t['tomorrow']}，後天是 {t['day_after']}。
-
 service 只能是：剪髮、洗髮、染髮、燙髮。判斷不出來填「不明確」。
-day 只能是：禮拜一、禮拜二、禮拜三、禮拜四、禮拜五、禮拜六、禮拜天。
-客人說「今天、明天、後天」時，請依上面的對照換算成星期；客人完全沒提到日期，填「未指定」。
+day 只能是：今天、明天、後天、禮拜一、禮拜二、禮拜三、禮拜四、禮拜五、禮拜六、禮拜天。
+請照客人的說法填寫，不要自己換算；客人沒提到日期，或說法無法對應（例如下個月、大後天），填「未指定」。
 
 客人的話：{user_message}
 """
@@ -201,24 +322,32 @@ day 只能是：禮拜一、禮拜二、禮拜三、禮拜四、禮拜五、禮�
         info = json.loads(response.text)
     except json.JSONDecodeError:
         info = {}
+    service = info.get("service", "不明確")
+    day = info.get("day", "未指定")
     return {
-        "service": info.get("service", "不明確"),
-        "day": info.get("day", "未指定"),
+        "service": service if service in VALID_SERVICES else "不明確",
+        "day": day if day in VALID_DAYS else "未指定",
     }
 
 class BookingState(TypedDict):
     user_message: str
-    service: str
-    day: str
+    customer_name: str
+    service: str         # 剪髮 / 洗髮 / 染髮 / 燙髮，尚未決定為「不明確」
+    date: str            # 真實日期 YYYY-MM-DD，尚未決定為空字串
     is_available: bool
+    appointment_id: int  # 預約成功後的預約編號，未成功為 0
+    reason: str          # 不能預約的原因：closed(公休) / full(額滿) / duplicate(重複預約)，可以預約則為空字串
+    suggestions: list    # 不能預約時，主動建議的其他日期
+    existing: str        # 重複預約時，說明已經存在的那一筆
+    same_visit: list     # 這位客人這天已經預約的其他服務(同一次到店一起進行)
 
 def extract_info(state: BookingState) -> dict:
     info = extract_booking_info(state['user_message'])
-    # 這句話有明確說的就用新的；沒說的，沿用上一輪記住的(state 裡原本的值)
+    # 這句話有明確說的就用新的；沒說的，沿用上一輪記住的
     service = info['service'] if info['service'] != "不明確" else (state['service'] or "不明確")
-    day = info['day'] if info['day'] != "未指定" else (state['day'] or "未指定")
-    print(f"判斷出的預約資訊：服務={service}，日期={day}")
-    return {"service": service, "day": day}
+    date = resolve_date(info['day']) or state['date']
+    print(f"判斷出的預約資訊：服務={service}，日期={date or '未指定'}")
+    return {"service": service, "date": date}
 
 def ask_clarification(state: BookingState) -> dict:
     print("不好意思，請問您想預約剪髮、洗髮、染髮還是燙髮呢？")
@@ -229,35 +358,65 @@ def ask_day(state: BookingState) -> dict:
     return {}
 
 def check_availability(state: BookingState) -> dict:
-    print(f"查詢 {state['day']} 是否有空位...")
+    date = state['date']
+    print(f"查詢 {date} 是否有空位...")
     # 營業時間只有 check_opening_hours 一個來源，不另外維護第二份名單
-    hours = check_opening_hours(state['day'])
-    available = hours not in ("公休", "查無此資料")
-    return {"is_available": available}
+    hours = check_opening_hours(weekday_label(date))
+    if hours in ("公休", "查無此資料"):
+        return {"is_available": False, "reason": "closed", "suggestions": find_open_dates(date), "same_visit": []}
 
-def confirm_booking(state: BookingState) -> dict:
-    print(f"已為您確認預約：{state['service']}，{state['day']}")
+    mine = booked_services(state['customer_name'], date)  # 這位客人這天已預約的 [(編號, 服務), ...]
+    for appointment_id, service in mine:
+        if service == state['service']:
+            return {"is_available": False, "reason": "duplicate", "existing": f"預約編號 {appointment_id}", "same_visit": []}
+
+    # 這位客人這天已經有預約時，再加一項服務算「同一次到店」，不佔新的名額；否則要看名額有沒有滿
+    if not mine and count_visits(date) >= MAX_PER_DAY:
+        return {"is_available": False, "reason": "full", "suggestions": find_open_dates(date), "same_visit": []}
+
+    return {"is_available": True, "reason": "", "suggestions": [], "existing": "",
+            "same_visit": [service for _, service in mine]}
+
+def ask_name(state: BookingState) -> dict:
+    print("需要姓名才能完成預約")
     return {}
 
+def confirm_booking(state: BookingState) -> dict:
+    appointment_id = create_appointment(state['customer_name'], state['service'], state['date'])
+    if appointment_id == 0:
+        # 剛才檢查時可以預約，寫入時卻不行(剛好被別人訂滿，或重複送出)：重新判斷一次原因
+        print(f"寫入失敗：{state['date']}，重新判斷原因")
+        recheck = check_availability(state)
+        if recheck["is_available"]:
+            recheck = {"is_available": False, "reason": "full", "suggestions": find_open_dates(state['date'])}
+        return recheck
+    print(f"已寫入預約 #{appointment_id}：{state['customer_name']}，{state['service']}，{state['date']}")
+    return {"appointment_id": appointment_id}
+
 def suggest_reschedule(state: BookingState) -> dict:
-    print(f"很抱歉，{state['day']} 公休，建議您改約其他時間")
+    print(f"{state['date']} 無法預約(原因：{state['reason']})，建議改約：{state['suggestions']}")
     return {}
 
 def route_after_extract(state: BookingState) -> str:
     if state['service'] == "不明確":
         return "ask_clarification"
-    if state['day'] == "未指定":
+    if not state['date']:
         return "ask_day"
     return "check_availability"
 
 def route_after_check(state: BookingState) -> str:
-    return "confirm_booking" if state['is_available'] else "suggest_reschedule"
+    if not state['is_available']:
+        return "suggest_reschedule"
+    if not state['customer_name'].strip():
+        return "ask_name"
+    return "confirm_booking"
 
 booking_graph = StateGraph(BookingState)
 booking_graph.add_node("extract_info", extract_info)
 booking_graph.add_node("ask_clarification", ask_clarification)
 booking_graph.add_node("ask_day", ask_day)
 booking_graph.add_node("check_availability", check_availability)
+booking_graph.add_node("ask_name", ask_name)
 booking_graph.add_node("confirm_booking", confirm_booking)
 booking_graph.add_node("suggest_reschedule", suggest_reschedule)
 booking_graph.set_entry_point("extract_info")
@@ -269,8 +428,11 @@ booking_graph.add_conditional_edges("extract_info", route_after_extract, {
 booking_graph.add_edge("ask_clarification", END)
 booking_graph.add_edge("ask_day", END)
 booking_graph.add_conditional_edges("check_availability", route_after_check, {
-    "confirm_booking": "confirm_booking", "suggest_reschedule": "suggest_reschedule"
+    "suggest_reschedule": "suggest_reschedule",
+    "ask_name": "ask_name",
+    "confirm_booking": "confirm_booking"
 })
+booking_graph.add_edge("ask_name", END)
 booking_graph.add_edge("confirm_booking", END)
 booking_graph.add_edge("suggest_reschedule", END)
 
@@ -279,14 +441,26 @@ booking_app = booking_graph.compile()
 def booking_reply(result: dict) -> str:
     """把預約子圖跑完的最終 state，轉成要回給客人的一句話"""
     if result['service'] == "不明確":
-        if result['day'] != "未指定":
-            return f"好的，{result['day']}。請問您想預約剪髮、洗髮、染髮還是燙髮呢？"
+        if result['date']:
+            return f"好的，{fmt_date(result['date'])}。請問您想預約剪髮、洗髮、染髮還是燙髮呢？"
         return "不好意思，請問您想預約剪髮、洗髮、染髮還是燙髮呢？"
-    if result['day'] == "未指定":
+    if not result['date']:
         return f"好的，{result['service']}沒問題。請問您想預約哪一天呢？"
-    if result['is_available']:
-        return f"已為您確認預約：{result['service']}，{result['day']}"
-    return f"很抱歉，{result['day']} 公休，建議您改約其他時間"
+    if not result['is_available']:
+        d = fmt_date(result['date'])
+        if result['reason'] == "duplicate":
+            return f"您在{d}已經預約了{result['service']}（{result['existing']}），不需要重複預約喔。"
+        why = "公休" if result['reason'] == "closed" else "預約已額滿"
+        if result['suggestions']:
+            options = "、".join(fmt_date(x) for x in result['suggestions'])
+            return f"很抱歉，{d}{why}。最近還有空位的日子：{options}。請問您想改約哪一天呢？"
+        return f"很抱歉，{d}{why}，而且接下來兩週都沒有空位，建議您稍後再來詢問。"
+    if not result['appointment_id']:
+        return f"{fmt_date(result['date'])}有空位。請在上方「您的姓名」欄位填入姓名後，回覆「確認」即可完成預約。"
+    msg = f"已為您確認預約：{result['service']}，{fmt_date(result['date'])}，預約編號 {result['appointment_id']}。"
+    if result['same_visit']:
+        msg += f"您這天另外預約了{'、'.join(result['same_visit'])}，會安排在同一次到店一起進行。"
+    return msg
 
 # ====================================================
 # 區塊 4：最外層的蜂巢式多 Agent 大圖
@@ -299,21 +473,22 @@ class HiveState(TypedDict):
     day: str
     is_available: bool
     final_response: str
-    draft: dict  # 這位客人「預約到一半」的資訊，例如 {"service": "剪髮", "day": ""}
+    customer_name: str  # 客人在介面上輸入的姓名(可空白)
+    draft: dict  # 這位客人「預約到一半」的資訊，例如 {"service": "剪髮", "date": ""}
 
 def describe_draft(draft: dict) -> str:
     parts = []
     if draft.get("service"):
         parts.append(f"服務：{draft['service']}")
-    if draft.get("day"):
-        parts.append(f"日期：{draft['day']}")
+    if draft.get("date"):
+        parts.append(f"日期：{fmt_date(draft['date'])}")
     return "、".join(parts) if parts else "（尚無）"
 
 def router(state: HiveState) -> dict:
     user_input = state['user_message']
     draft = state.get('draft') or {}
     pending = ""
-    if draft.get("service") or draft.get("day"):
+    if draft.get("service") or draft.get("date"):
         pending = (
             f"\n目前客人正在進行預約，系統已記住：{describe_draft(draft)}。"
             "如果客人這句話是在補充或修改預約資訊（例如回答服務項目或日期），請回 booking；"
@@ -334,28 +509,34 @@ def router(state: HiveState) -> dict:
 
 def faq_agent(state: HiveState) -> dict:
     user_input = state['user_message']
-    dummy_customer = Customer(name="訪客", is_new=False, visit_count=2)
-    response_text = ask(user_input, dummy_customer)
+    customer = identify_customer(state.get('customer_name', ''))
+    response_text = ask(user_input, customer)
     print(f"FAQ Agent 回覆：{response_text}")
     return {"final_response": response_text}
 
 def next_draft(result: dict) -> dict:
     """依預約子圖的結果，決定下一輪要記住什麼"""
-    if result['service'] != "不明確" and result['day'] != "未指定" and result['is_available']:
-        return {}  # 預約完成，清空記憶
+    if result['appointment_id'] or result['reason'] == "duplicate":
+        return {}  # 預約完成，或這天已經有預約：清空記憶
     service = "" if result['service'] == "不明確" else result['service']
-    day = "" if result['day'] == "未指定" else result['day']
-    if service and day and not result['is_available']:
-        day = ""  # 那天不能約：保留服務，等客人改別天
-    return {"service": service, "day": day}
+    date = result['date']
+    if result['reason'] in ("closed", "full"):
+        date = ""  # 那天不能約：保留服務，等客人改別天
+    return {"service": service, "date": date}
 
 def booking_agent(state: HiveState) -> dict:
     draft = state.get('draft') or {}
     booking_initial_state = {
         "user_message": state['user_message'],
+        "customer_name": (state.get('customer_name') or "").strip(),
         "service": draft.get("service", ""),
-        "day": draft.get("day", ""),
-        "is_available": False
+        "date": draft.get("date", ""),
+        "is_available": False,
+        "appointment_id": 0,
+        "reason": "",
+        "suggestions": [],
+        "existing": "",
+        "same_visit": [],
     }
     booking_result = booking_app.invoke(booking_initial_state)
     return {
@@ -381,7 +562,7 @@ hive_app = hive_graph.compile()
 
 # ---------- Gradio 介面 ----------
 
-def chatbot_interface(question: str, draft: dict):
+def chatbot_interface(question: str, customer_name: str, draft: dict):
     draft = draft or {}
     result = hive_app.invoke({
         "user_message": question,
@@ -390,6 +571,7 @@ def chatbot_interface(question: str, draft: dict):
         "day": "",
         "is_available": False,
         "final_response": "",
+        "customer_name": customer_name or "",
         "draft": draft
     })
     new_draft = result.get("draft") or {}
@@ -399,6 +581,7 @@ demo = gr.Interface(
     fn=chatbot_interface,
     inputs=[
         gr.Textbox(label="請輸入您的問題（可以問價格/營業時間/保養問題，也可以直接說想預約）"),
+        gr.Textbox(label="您的姓名（選填，系統會查詢會員資料。可試試：小華、小明、小美）"),
         gr.State({}),
     ],
     outputs=[
