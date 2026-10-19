@@ -28,6 +28,17 @@ CREATE TABLE IF NOT EXISTS appointments (
     date        TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'confirmed'
 );
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at    TEXT NOT NULL,
+    session_id    TEXT,
+    customer_name TEXT,
+    user_message  TEXT NOT NULL,
+    intent        TEXT,
+    reply         TEXT,
+    latency_ms    INTEGER
+);
 """
 
 # 以下都是模擬資料(原本寫死在 app.py 的字典，現在搬進資料庫)
@@ -69,7 +80,7 @@ if __name__ == "__main__":
 
     # 建好之後，實際查一次看看
     conn = sqlite3.connect(DB_PATH)
-    for table in ["services", "business_hours", "customers", "appointments"]:
+    for table in ["services", "business_hours", "customers", "appointments", "conversations"]:
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         print(f"{table}: {count} 筆")
 

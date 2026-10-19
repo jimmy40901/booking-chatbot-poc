@@ -10,6 +10,8 @@ except ImportError:
     pass
 import os
 import json
+import time
+import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -147,6 +149,31 @@ def create_appointment(customer_name: str, service: str, date_str: str) -> int:
         return cur.lastrowid
     finally:
         conn.close()
+
+# ---------- 對話紀錄：記下每一輪「客人問了什麼、系統怎麼答」 ----------
+
+def log_conversation(session_id: str, customer_name: str, user_message: str,
+                     intent: str, reply: str, latency_ms: int) -> None:
+    """記錄一輪對話。記錄失敗不能影響客人使用，所以任何錯誤都只印出來，不往外丟。
+    輸入與回覆都限制長度，避免被塞入超長內容。"""
+    try:
+        now = datetime.now(TAIPEI).strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            conn.execute(
+                """INSERT INTO conversations
+                   (created_at, session_id, customer_name, user_message, intent, reply, latency_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (now, session_id or "", (customer_name or "")[:30], (user_message or "")[:500],
+                 intent or "", (reply or "")[:1000], latency_ms)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[log error] {type(e).__name__}")  # 只印錯誤種類，不印使用者輸入
+
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")  # 管理後台密碼；沒有設定就不開放
 
 # ---------- FAQ 資料：讀取 CSV 與預先建好的向量(由 build_index.py 產生) ----------
 # 用「這個檔案所在的資料夾」當基準，不管從哪裡執行都找得到 data 資料夾
@@ -562,8 +589,9 @@ hive_app = hive_graph.compile()
 
 # ---------- Gradio 介面 ----------
 
-def chatbot_interface(question: str, customer_name: str, draft: dict):
+def chatbot_interface(question: str, customer_name: str, draft: dict, request: gr.Request = None):
     draft = draft or {}
+    start = time.perf_counter()
     result = hive_app.invoke({
         "user_message": question,
         "intent": "",
@@ -574,7 +602,12 @@ def chatbot_interface(question: str, customer_name: str, draft: dict):
         "customer_name": customer_name or "",
         "draft": draft
     })
+    latency_ms = int((time.perf_counter() - start) * 1000)
     new_draft = result.get("draft") or {}
+
+    session_id = getattr(request, "session_hash", "") or ""
+    log_conversation(session_id, customer_name, question, result.get("intent", ""),
+                     result['final_response'], latency_ms)
     return result['final_response'], describe_draft(new_draft), new_draft
 
 demo = gr.Interface(
@@ -590,7 +623,35 @@ demo = gr.Interface(
         gr.State(),
     ],
     title="髮廊客服 Multi-Agent Chatbot",
-    description="蜂巢式多 Agent 架構：Router 自動判斷意圖，分派給 FAQ Agent（Tool Calling + RAG）或 Booking Agent（LangGraph 引導式流程）。預約資訊不完整時會追問，可在同一頁連續輸入；重新整理頁面會重置記憶。"
+    description=(
+        "蜂巢式多 Agent 架構：Router 自動判斷意圖，分派給 FAQ Agent（Tool Calling + RAG）"
+        "或 Booking Agent（LangGraph 引導式流程）。預約資訊不完整時會追問，可在同一頁連續輸入；"
+        "重新整理頁面會重置記憶。\n\n"
+        "⚠️ 為了改善系統，您輸入的內容與系統回覆會被記錄。請勿輸入真實個資，姓名欄請使用暱稱。"
+    )
 )
 
-demo.launch()
+# ---------- 管理後台：用密碼保護，只看得到最近的對話紀錄 ----------
+
+LOG_COLUMNS = ["時間", "姓名", "客人說的話", "判斷意圖", "系統回覆", "耗時(ms)"]
+
+def admin_view_logs(token: str):
+    # 用 bytes 比較：compare_digest 對含中文的字串會報錯；它也能避免用回應時間猜密碼
+    if not ADMIN_TOKEN or not secrets.compare_digest((token or "").encode(), ADMIN_TOKEN.encode()):
+        return [["（密碼錯誤，或尚未設定管理密碼）", "", "", "", "", ""]]
+    rows = query_all(
+        """SELECT created_at, customer_name, user_message, intent, reply, latency_ms
+           FROM conversations ORDER BY id DESC LIMIT 50"""
+    )
+    return [list(r) for r in rows] or [["（目前沒有紀錄）", "", "", "", "", ""]]
+
+admin_demo = gr.Interface(
+    fn=admin_view_logs,
+    inputs=gr.Textbox(label="管理密碼", type="password"),
+    outputs=gr.Dataframe(headers=LOG_COLUMNS, label="最近 50 筆對話"),
+    title="管理後台",
+    description="輸入管理密碼後，可查看最近的對話紀錄。"
+)
+
+app_ui = gr.TabbedInterface([demo, admin_demo], ["客服", "管理後台"])
+app_ui.launch()
