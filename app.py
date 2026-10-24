@@ -282,8 +282,17 @@ def ask(question: str, customer: Customer) -> str:
 
 WEEKDAYS = ["禮拜一", "禮拜二", "禮拜三", "禮拜四", "禮拜五", "禮拜六", "禮拜天"]
 TAIPEI = timezone(timedelta(hours=8))  # 台灣時區(UTC+8)，避免伺服器在 UTC 時算錯日期
-VALID_DAYS = ["今天", "明天", "後天"] + WEEKDAYS
-VALID_SERVICES = ["剪髮", "洗髮", "染髮", "燙髮"]
+VALID_DAYS = ["今天", "明天", "後天"] + WEEKDAYS + ["下" + d for d in WEEKDAYS]
+VALID_SERVICES = ["剪髮", "洗髮", "染髮", "燙髮"] #固定的服務
+SERVICE_SYNONYMS = {  #相似的歸類成我們上面要的固定的格式
+    "理髮": "剪髮",
+    "剪頭髮": "剪髮",
+    "理頭髮": "剪髮",
+    "洗頭": "洗髮",
+    "洗頭髮": "洗髮",
+    "染頭髮": "染髮",
+    "燙頭髮": "燙髮",
+}
 
 def resolve_date(day_phrase: str, today=None) -> str:
     """把客人說的日期說法換算成真實日期(YYYY-MM-DD)；無法判斷時回傳空字串。
@@ -302,6 +311,9 @@ def resolve_date(day_phrase: str, today=None) -> str:
         if delta == 0:
             delta = 7
         target = today + timedelta(days=delta)
+    elif day_phrase.startswith("下") and day_phrase[1:] in WEEKDAYS:
+        next_monday = today + timedelta(days=7 - today.weekday())
+        target = next_monday + timedelta(days=WEEKDAYS.index(day_phrase[1:]))
     else:
         return ""
     return target.isoformat()
@@ -334,9 +346,10 @@ def extract_booking_info(user_message: str) -> dict:
     prompt = f"""從客人的話中提取預約資訊，以 JSON 回覆，格式如下：
 {{"service": "...", "day": "..."}}
 
-service 只能是：剪髮、洗髮、染髮、燙髮。判斷不出來填「不明確」。
-day 只能是：今天、明天、後天、禮拜一、禮拜二、禮拜三、禮拜四、禮拜五、禮拜六、禮拜天。
-請照客人的說法填寫，不要自己換算；客人沒提到日期，或說法無法對應（例如下個月、大後天），填「未指定」。
+day 只能是：今天、明天、後天、禮拜一、禮拜二、禮拜三、禮拜四、禮拜五、禮拜六、禮拜天，
+或「下禮拜」加上星期幾（下禮拜一、下禮拜二、下禮拜三、下禮拜四、下禮拜五、下禮拜六、下禮拜天）。
+「星期」、「週」、「禮拜」是同一個意思，請統一寫成「禮拜」，例如客人說「下星期四」就填「下禮拜四」。
+只要把說法寫成上面的選項，不要自己計算日期；客人沒提到日期，或說法無法對應（例如下個月、大後天），填「未指定」。
 
 客人的話：{user_message}
 """
@@ -350,6 +363,7 @@ day 只能是：今天、明天、後天、禮拜一、禮拜二、禮拜三、�
     except json.JSONDecodeError:
         info = {}
     service = info.get("service", "不明確")
+    service = SERVICE_SYNONYMS.get(service, service)
     day = info.get("day", "未指定")
     return {
         "service": service if service in VALID_SERVICES else "不明確",
