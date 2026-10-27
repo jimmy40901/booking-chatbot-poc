@@ -2,7 +2,8 @@ import asyncio
 import sys
 from pathlib import Path
 
-from mcp import Client, StdioServerParameters, stdio_client
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from mcp.types import TextContent
 
 _PARAMS = StdioServerParameters(
@@ -12,8 +13,10 @@ _PARAMS = StdioServerParameters(
 
 
 async def _call(name: str, arguments: dict) -> str:
-    async with Client(stdio_client(_PARAMS)) as client:
-        result = await client.call_tool(name, arguments)
+    async with stdio_client(_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(name, arguments=arguments)
     text = ""
     for block in result.content:
         if isinstance(block, TextContent):
