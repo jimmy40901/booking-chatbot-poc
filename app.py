@@ -23,7 +23,6 @@ from langgraph.graph import StateGraph, END
 import numpy as np
 import pandas as pd
 from init_db import init_db, DB_PATH
-from mcp_client import call_mcp_tool
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
@@ -244,7 +243,6 @@ def build_system_prompt(customer: Customer) -> str:
         extra += f"客人的名字是{customer.name}，可以適度稱呼對方。"
     return base + extra
 
-ALLOWED_TOOLS = {"check_opening_hours", "check_service_price", "search_faq"}
 def ask(question: str, customer: Customer) -> str:
     system_prompt = build_system_prompt(customer)
     response = client.models.generate_content(
@@ -258,9 +256,12 @@ def ask(question: str, customer: Customer) -> str:
         return response.text
 
     function_call = part.function_call
-    if function_call.name not in ALLOWED_TOOLS:
-        return "抱歉，我暫時無法處理這個問題。"
-    tool_result = call_mcp_tool(function_call.name, dict(function_call.args))
+    if function_call.name == "check_opening_hours":
+        tool_result = check_opening_hours(**function_call.args)
+    elif function_call.name == "check_service_price":
+        tool_result = check_service_price(**function_call.args)
+    elif function_call.name == "search_faq":
+        tool_result = search_faq(**function_call.args)
 
     final_response = client.models.generate_content(
         model="gemini-3.5-flash-lite",
