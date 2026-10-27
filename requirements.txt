@@ -4,4 +4,4 @@ gradio
 numpy
 langgraph
 pandas
-mcp<2
+mcp==2.3.0

@@ -1,5 +1,5 @@
 import sqlite3
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from init_db import DB_PATH
 import os
 import numpy as np
@@ -7,7 +7,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from google import genai
 
-mcp = FastMCP("salon-tools")
+mcp = MCPServer("salon-tools")
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
