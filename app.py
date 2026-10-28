@@ -252,28 +252,31 @@ def ask(question: str, customer: Customer) -> str:
         contents=question,
         config=types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt)
     )
-    part = response.candidates[0].content.parts[0]
+    parts = response.candidates[0].content.parts
+    function_calls = [p.function_call for p in parts if p.function_call]
 
-    if part.function_call is None:
+    if not function_calls:
         return response.text
 
-    function_call = part.function_call
-    if function_call.name not in ALLOWED_TOOLS:
-        return "抱歉，我暫時無法處理這個問題。"
-    try:
-        tool_result = call_mcp_tool(function_call.name, dict(function_call.args))
-    except Exception as e:
-        print("MCP 工具呼叫失敗：", type(e).__name__)
-        return "抱歉，系統暫時無法查詢，請稍後再試。"
+    response_parts = []
+    for function_call in function_calls:
+        if function_call.name not in ALLOWED_TOOLS:
+            return "抱歉，我暫時無法處理這個問題。"
+        try:
+            tool_result = call_mcp_tool(function_call.name, dict(function_call.args))
+        except Exception as e:
+            print("MCP 工具呼叫失敗：", type(e).__name__)
+            return "抱歉，系統暫時無法查詢，請稍後再試。"
+        response_parts.append(types.Part.from_function_response(
+            name=function_call.name, response={"result": tool_result}
+        ))
 
     final_response = client.models.generate_content(
         model="gemini-3.5-flash-lite",
         contents=[
             question,
             response.candidates[0].content,
-            types.Content(role="user", parts=[types.Part.from_function_response(
-                name=function_call.name, response={"result": tool_result}
-            )])
+            types.Content(role="user", parts=response_parts)
         ],
         config=types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt)
     )
