@@ -260,7 +260,11 @@ def ask(question: str, customer: Customer) -> str:
     function_call = part.function_call
     if function_call.name not in ALLOWED_TOOLS:
         return "抱歉，我暫時無法處理這個問題。"
-    tool_result = call_mcp_tool(function_call.name, dict(function_call.args))
+    try:
+        tool_result = call_mcp_tool(function_call.name, dict(function_call.args))
+    except Exception as e:
+        print("MCP 工具呼叫失敗：", type(e).__name__)
+        return "抱歉，系統暫時無法查詢，請稍後再試。"
 
     final_response = client.models.generate_content(
         model="gemini-3.5-flash-lite",
