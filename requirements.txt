@@ -1,7 +1,7 @@
 google-genai==2.25.0
-python-dotenv
+python-dotenv==1.2.4
 gradio
 numpy
-langgraph
+langgraph==1.2.18
 pandas
-mcp<2
+mcp==1.30.0
