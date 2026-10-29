@@ -23,7 +23,7 @@ from langgraph.graph import StateGraph, END
 import numpy as np
 import pandas as pd
 from init_db import init_db, DB_PATH
-from mcp_client import call_mcp_tool
+from mcp_client import call_mcp_tools
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
@@ -258,18 +258,20 @@ def ask(question: str, customer: Customer) -> str:
     if not function_calls:
         return response.text
 
-    response_parts = []
     for function_call in function_calls:
         if function_call.name not in ALLOWED_TOOLS:
             return "抱歉，我暫時無法處理這個問題。"
-        try:
-            tool_result = call_mcp_tool(function_call.name, dict(function_call.args))
-        except Exception as e:
-            print("MCP 工具呼叫失敗：", type(e).__name__)
-            return "抱歉，系統暫時無法查詢，請稍後再試。"
-        response_parts.append(types.Part.from_function_response(
-            name=function_call.name, response={"result": tool_result}
-        ))
+    try:
+        tool_results = call_mcp_tools(
+            [(fc.name, dict(fc.args)) for fc in function_calls]
+        )
+    except Exception as e:
+        print("MCP 工具呼叫失敗：", type(e).__name__)
+        return "抱歉，系統暫時無法查詢，請稍後再試。"
+    response_parts = [
+        types.Part.from_function_response(name=fc.name, response={"result": result})
+        for fc, result in zip(function_calls, tool_results)
+    ]
 
     final_response = client.models.generate_content(
         model="gemini-3.5-flash-lite",
