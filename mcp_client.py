@@ -1,19 +1,27 @@
 import asyncio
 import sys
 from pathlib import Path
+import os
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import TextContent
 
-_PARAMS = StdioServerParameters(
-    command=sys.executable,
-    args=[str(Path(__file__).with_name("mcp_server.py"))],
-)
+def _params():
+    # 子行程預設不會繼承我們的金鑰，這裡明確傳過去（只放記憶體，不寫檔、不印出）
+    env = {}
+    key = os.getenv("GEMINI_API_KEY")
+    if key:
+        env["GEMINI_API_KEY"] = key
+    return StdioServerParameters(
+        command=sys.executable,
+        args=[str(Path(__file__).with_name("mcp_server.py"))],
+        env=env or None,
+    )
 
 
 async def _call(name: str, arguments: dict) -> str:
-    async with stdio_client(_PARAMS) as (read, write):
+    async with stdio_client(_params()) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(name, arguments=arguments)
@@ -29,7 +37,7 @@ def call_mcp_tool(name: str, arguments: dict) -> str:
     return asyncio.run(_call(name, arguments))
 
 async def _call_many(calls: list) -> list:
-    async with stdio_client(_PARAMS) as (read, write):
+    async with stdio_client(_params()) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             texts = []
