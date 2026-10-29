@@ -2,3 +2,4 @@
 booking.db
 logs_export.csv
 __pycache__/
+eval/eval_vectors.npy
