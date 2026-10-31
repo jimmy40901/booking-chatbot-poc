@@ -675,5 +675,6 @@ admin_demo = gr.Interface(
     description="輸入管理密碼後，可查看最近的對話紀錄。"
 )
 
-app_ui = gr.TabbedInterface([demo, admin_demo], ["客服", "管理後台"])
-app_ui.launch()
+if __name__ == "__main__":
+    app_ui = gr.TabbedInterface([demo, admin_demo], ["客服", "管理後台"])
+    app_ui.launch()
