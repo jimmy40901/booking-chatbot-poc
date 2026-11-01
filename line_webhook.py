@@ -6,7 +6,8 @@ import os
 from dotenv import load_dotenv
 import httpx
 import asyncio
-from app import chatbot_interface
+import line_users
+from app import chatbot_interface, fmt_date
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -43,14 +44,30 @@ def reply_text(reply_token: str, text: str) -> None:
         print("LINE 回覆失敗：", type(e).__name__)
 
 drafts = {}  # {LINE 使用者 ID: 預約草稿}，只存在記憶體，重啟會消失
+line_users.init_line_users()
 
 
 def answer(user_id: str, text: str) -> str:
     """把客人的話交給現有的客服流程，回傳要回覆的文字"""
     try:
+        text = text[:500]
         draft = drafts.get(user_id, {})
-        reply, _, new_draft = chatbot_interface(text[:500], "", draft)
+        name = line_users.get_name(user_id) if user_id else ""
+
+        waiting_for_name = bool(draft.get("service") and draft.get("date")) and not name
+        if waiting_for_name and user_id:
+            clean = text.strip()
+            if not clean or len(clean) > 30:
+                return "請問怎麼稱呼您呢？（請直接輸入姓名，30 字以內）"
+            line_users.set_name(user_id, clean)
+            name = clean
+            text = "確認"
+
+        reply, _, new_draft = chatbot_interface(text, name, draft)
         drafts[user_id] = new_draft
+
+        if not name and new_draft.get("service") and new_draft.get("date"):
+            reply = f"{fmt_date(new_draft['date'])}有空位。請問怎麼稱呼您呢？"
         return reply
     except Exception as e:
         print("客服流程失敗：", type(e).__name__)
