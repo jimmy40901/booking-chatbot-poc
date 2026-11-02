@@ -178,6 +178,32 @@ Tool Calling 僅適用於結構化、可明確定義參數的查詢（如查詢�
 **重現方式**：先執行 `eval_retrieval.py`（會呼叫 Gemini embedding 30 次，產生 `eval/eval_vectors.npy`），再執行 `eval_score.py`（只讀本機檔案，不需網路）。
 
 
+## 快速開始（本機）
+
+**需求**：Python 3.11 或 3.12、[Git LFS](https://git-lfs.com)（FAQ 向量檔以 LFS 儲存）、Gemini API 金鑰。
+
+```
+git lfs install
+git clone https://github.com/jimmy40901/booking-chatbot-poc.git
+cd booking-chatbot-poc
+pip install -r requirements.txt gradio==6.29.1
+copy .env.example .env
+```
+
+- 請用 `git clone`，不要用 Download ZIP；沒有安裝 Git LFS 時，`data/faq_vectors_q.npy` 只會是指標檔，檢索會失敗。
+- `gradio==6.29.1` 與 Hugging Face Space 設定的版本相同；此版本要求 `mcp` 低於 2.0，所以 `requirements.txt` 另外鎖定 `mcp==1.30.0`。
+- 用文字編輯器打開 `.env`，填入 `GEMINI_API_KEY`（必填）。`ADMIN_TOKEN` 選填，沒設定時管理後台不開放。LINE 的兩個變數只有串接 LINE 時才需要。**金鑰只放 `.env`，不要提交到 Git。**
+
+**啟動**
+
+```
+python app.py
+```
+
+開啟 http://127.0.0.1:7860 。工具由 `mcp_server.py` 提供，會在需要時由程式自動啟動，不必另外執行。
+
+**LINE（選用，目前僅限本機）**：另外需要 LINE 官方帳號、Messaging API，以及 ngrok 之類的公開通道。以 `python -m uvicorn line_webhook:app --port 8000` 啟動，並將 Webhook 網址設為通道網址加上 `/callback`，且開啟 Use webhook。
+
 ### 部署紀錄：依賴版本不一致
 
 **現象**：加入 MCP 後推送到 Hugging Face，建置成功但啟動失敗，錯誤為 `ImportError: cannot import name 'genai' from 'google'`。更早一次的 Runtime error 當時沒有錯誤內容，無法確認是否為同一個原因。
