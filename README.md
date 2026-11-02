@@ -199,7 +199,7 @@ copy .env.example .env
 ```
 python app.py
 ```
-
+首次啟動時會自動建立 `booking.db` 並填入模擬資料（營業時間、價格、示範客戶）。
 開啟 http://127.0.0.1:7860 。工具由 `mcp_server.py` 提供，會在需要時由程式自動啟動，不必另外執行。
 
 **LINE（選用，目前僅限本機）**：另外需要 LINE 官方帳號、Messaging API，以及 ngrok 之類的公開通道。以 `python -m uvicorn line_webhook:app --port 8000` 啟動，並將 Webhook 網址設為通道網址加上 `/callback`，且開啟 Use webhook。
