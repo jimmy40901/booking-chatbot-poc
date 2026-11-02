@@ -13,7 +13,9 @@ license: mit
 
 # Booking Chatbot POC
 
-蜂巢式多 Agent 的髮廊客服 Chatbot（Gemini API ＋ LangGraph）
+客服 Chatbot POC（情境：髮廊預約與諮詢）
+
+以「Router ＋ 專責 Agent」架構實作，使用 Gemini API、LangGraph、MCP
 
 - 線上 Demo：https://huggingface.co/spaces/xuen0901/booking-chatbot-poc
 - 原始碼：https://github.com/jimmy40901/booking-chatbot-poc
@@ -24,12 +26,15 @@ license: mit
 
 ## 功能
 
-- 蜂巢式多 Agent 架構：Router 自動判斷使用者意圖，分派給對應的 Agent
-- FAQ Agent：結合 Tool Calling（查營業時間、服務價格）與 RAG（Embedding ＋ 餘弦相似度檢索服務說明文件）
-- Booking Agent：以 LangGraph 實作的引導式預約流程，能從對話中提取服務項目、處理意圖不明確的情況、依空位結果分岔
-- 依客戶身分（新客／熟客／一般舊客）動態組出 System Prompt，調整語氣與優惠提示
-- 預約流程能辨識「今天、明天、後天」等說法，資訊不足時會追問；預約到一半插入其他問題，已填的資訊不會遺失
-- Gradio 網頁介面，可即時互動測試
+- **Router ＋ 專責 Agent**：Router 判斷使用者意圖，分派給 FAQ Agent 或 Booking Agent
+- **FAQ Agent**：以 Tool Calling 查詢營業時間與價格，並用 RAG（Embedding ＋ 餘弦相似度）檢索 50 筆 FAQ；工具由獨立的 MCP Server 提供，一句話內的多個工具呼叫共用同一次連線
+- **Booking Agent**：以 LangGraph 實作的引導式預約流程，能從一句話提取服務與日期（今天、明天、後天、禮拜X、下禮拜X），資訊不足時追問，預約到一半插入其他問題，已填的資訊不會遺失
+- **預約規則**：以日期為單位；每天上限 5 位客人，同一位客人同一天的多項服務視為同一次到店；同一天同一服務不可重複預約；公休或額滿時說明原因，並建議最多 3 個可預約日期；預約回覆由程式模板產生，不由 LLM 生成
+- **資料層**：營業時間、價格、客人、預約與對話紀錄存於 SQLite；營業時間與價格只有這一個來源，FAQ 內容不重複放價格或營業時間
+- **客戶身分**：依新客、熟客、一般舊客動態組出 System Prompt，調整語氣與優惠提示
+- **管理後台**：檢視對話紀錄；以 `ADMIN_TOKEN` 保護，未設定則完全不開放
+- **介面**：Gradio 網頁（線上 Demo），以及 LINE 官方帳號（目前僅限本機執行，見下方「LINE 串接」）
+- **檢索評估**：30 題評估題，Top-1 命中率 21/24，Top-3 命中率 24/24（評估題為 AI 草擬，詳見下方「檢索評估」）
 
 ## 系統架構
 
