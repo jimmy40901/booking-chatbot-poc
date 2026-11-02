@@ -39,25 +39,39 @@ license: mit
 ## 系統架構
 
 ```
-使用者說一句話
-      │
-      ▼
-┌─────────────┐
-│   Router    │  判斷意圖（booking 或 faq）
-└─────────────┘
-      │
-      ├── faq ──────▶ FAQ Agent ───▶ ask()
-      │                               ├─ Tool Calling（營業時間、價格）
-      │                               ├─ RAG（FAQ 文件檢索）
-      │                               └─ 動態 System Prompt
-      │
-      └── booking ──▶ Booking Agent ──▶ booking_app（LangGraph 子圖）
-                                        ├─ 提取服務項目
-                                        ├─ 查空位
-                                        └─ 確認預約 / 建議改期
+使用者
+  ├─ Gradio 網頁（客服頁、管理後台）
+  └─ LINE 官方帳號（Webhook 驗簽；目前僅限本機）
+        │
+        ▼
+┌──────────────┐
+│    Router    │  Gemini 判斷意圖：faq 或 booking
+└──────────────┘
+        │
+        ├── faq ──────▶ FAQ Agent ──▶ ask()
+        │                              ├─ 動態 System Prompt（依客戶身分）
+        │                              └─ Gemini Tool Calling
+        │                                    │
+        │                            MCP Client（stdio）
+        │                                    ▼
+        │                            MCP Server（獨立行程）
+        │                              ├─ check_opening_hours ─▶ SQLite
+        │                              ├─ check_service_price ─▶ SQLite
+        │                              └─ search_faq ─▶ Embedding ＋ 餘弦相似度（50 筆 FAQ）
+        │
+        └── booking ──▶ Booking Agent ──▶ booking_app（LangGraph 子圖）
+                                           ├─ 提取服務與日期（Gemini；結果由 Python 驗證，日期由 Python 換算）
+                                           ├─ 資訊不足：追問服務或日期
+                                           ├─ 查空位（SQLite：公休、額滿、重複預約）
+                                           ├─ 可預約但沒有姓名：詢問姓名
+                                           ├─ 可預約：寫入預約（單一 SQL 原子寫入）
+                                           └─ 不可預約：說明原因並建議改期
+                                              （預約回覆為程式模板，非 LLM 生成）
+
+所有對話皆寫入 SQLite（對話紀錄），供管理後台檢視
 ```
 
-系統分為三層：資料層（客戶模板、工具函式、FAQ 資料）、能力層（`ask`、`booking_app`）、調度層（Router 與兩個 Agent）。下層不依賴上層，因此新增 Agent 時只需修改調度層。
+系統分為四層：資料層（SQLite、FAQ 與向量檔）、工具層（MCP Server）、能力層（`ask`、`booking_app`）、調度層（Router 與兩個 Agent）；介面（Gradio、LINE）在最上面，與調度層對接。下層不依賴上層，因此新增 Agent 時只需修改調度層，新增介面時不需改動既有流程（LINE 即以此方式接入）。這是邏輯上的分層，程式碼目前主要集中在 `app.py`。
 
 ## 架構設計決策
 
