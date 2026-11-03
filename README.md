@@ -50,7 +50,13 @@ license: mit
 
 ![詢問 FAQ 沒有的內容](assets/03-no-guess.png)
 
-以上為 Gradio 網頁介面；回覆內容由 LLM 生成，每次可能略有不同。
+以上三張為 Gradio 網頁介面；回覆內容由 LLM 生成，每次可能略有不同。
+
+**LINE：聊天室內預約，第一次預約時詢問姓名**
+
+<img src="assets/04-line-booking.jpg" width="360" alt="LINE 預約對話：追問日期、詢問姓名、預約成功；再預約洗髮時安排在同一次到店">
+
+LINE 目前僅限本機執行（見「LINE 串接」），畫面為測試資料。同一天加預約第二項服務時，系統視為同一次到店。
 
 ## 系統架構
 
